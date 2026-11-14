@@ -36,20 +36,20 @@ function parseFlags(argv: string[]): Flags {
 }
 
 /** The dashboard and screenshots as the entry ships them: main.ts's own directory. */
-function hereDir(): string {
+function entryDir(): string {
   return resolve(join(import.meta.url.replace(/^file:\/\//, ''), '..'));
 }
 
 /** Copies one plain file tree into another, quietly; a missing source directory is refused. */
-function copyTree(src: string, dst: string): number {
+function copyTreeFiles(src: string, dst: string): number {
   let n = 0;
-  const walk = (a: string, b: string): void => {
+  const walkTree = (a: string, b: string): void => {
     for (const e of readdirSync(a, { withFileTypes: true })) {
       const s = join(a, e.name);
       const d = join(b, e.name);
       if (e.isDirectory()) {
         mkdirSync(d, { recursive: true });
-        walk(s, d);
+        walkTree(s, d);
       } else if (e.isFile()) {
         copyFileSync(s, d);
         n++;
@@ -58,29 +58,34 @@ function copyTree(src: string, dst: string): number {
   };
   if (!existsSync(src)) throw new Error(`no ${src}: the dashboard ships in the entry`);
   mkdirSync(dst, { recursive: true });
-  walk(src, dst);
+  walkTree(src, dst);
   return n;
+}
+
+/** The board's own gate, before anything is written: coverage, ranks, order, farm steps, size. */
+function assertBoardSize(board: { length: number }): void {
+  if (board.length < 100) throw new Error(`the board holds ${board.length} rows, fewer than the gate's 100`);
+  if (board.length > 4_000) throw new Error(`the board holds ${board.length} rows, more than the gate's 4,000`);
 }
 
 function main(): void {
   const flags = parseFlags(process.argv.slice(2));
   const input = flags.input ?? join(inputDir, 'snapshot.json');
   const output = resolve(flags.output ?? outputDir);
-  const here = hereDir();
+  const here = entryDir();
 
   const snapshot = parseSnapshot(readFileSync(input, 'utf8'));
   const { board, radar } = buildRadar(snapshot, MODEL);
 
   const issue = boardIssue(board, snapshot);
   if (issue !== null) throw new Error(`the board fails its own gate: ${issue}`);
-  if (board.length < 100) throw new Error(`the board holds ${board.length} rows, fewer than the gate's 100`);
-  if (board.length > 4_000) throw new Error(`the board holds ${board.length} rows, more than the gate's 4,000`);
+  assertBoardSize(board);
 
   mkdirSync(output, { recursive: true });
   writeFileSync(join(output, 'board.json'), `${JSON.stringify(board, null, 2)}\n`);
   writeFileSync(join(output, 'data.js'), dataScript(radar));
-  const dashFiles = copyTree(join(here, 'dashboard'), join(output, 'dashboard'));
-  const shots = existsSync(join(here, 'screenshots')) ? copyTree(join(here, 'screenshots'), join(output, 'screenshots')) : 0;
+  const dashboardFiles = copyTreeFiles(join(here, 'dashboard'), join(output, 'dashboard'));
+  const screenshotCount = existsSync(join(here, 'screenshots')) ? copyTreeFiles(join(here, 'screenshots'), join(output, 'screenshots')) : 0;
   writeFileSync(join(output, 'dossier.json'), buildDossier(output, { text_max_bytes: 65536 }));
 
   const top = board[0]!;
@@ -90,7 +95,7 @@ function main(): void {
   console.log(`  top: ${top.name} ($${top.implied_value_usd.toLocaleString('en-US')})`);
   console.log(`  bottom: ${low.name} ($${low.implied_value_usd.toLocaleString('en-US')})`);
   console.log(`  model: ${MODEL_VERSION}; global multiple ${radar.global_multiple}; ${radar.comparables.length} categories with comparables`);
-  console.log(`  dashboard: ${dashFiles} files; screenshots: ${shots} images`);
+  console.log(`  dashboard: ${dashboardFiles} files; screenshots: ${screenshotCount} images`);
   console.log(`  wrote: ${join(output, 'board.json')}, ${join(output, 'data.js')}, ${join(output, 'dossier.json')}`);
 }
 
