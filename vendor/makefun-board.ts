@@ -76,14 +76,14 @@ export class DossierError extends Error {
 
 // ---------------------------------------------------------------- bytes
 
-const sha256Hex = (bytes: Uint8Array): string => createHash('sha256').update(bytes).digest('hex');
-const byCodeUnit = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
-const byteLength = (s: string): number => Buffer.byteLength(s, 'utf8');
+const sha256HexDigest = (bytes: Uint8Array): string => createHash('sha256').update(bytes).digest('hex');
+const compareCodeUnits = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+const utf8ByteLength = (s: string): number => Buffer.byteLength(s, 'utf8');
 
 const PNG_MAGIC = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 const JPEG_MAGIC = [0xff, 0xd8, 0xff];
 
-const opensWith = (bytes: Uint8Array, magic: readonly number[]): boolean =>
+const startsWithMagic = (bytes: Uint8Array, magic: readonly number[]): boolean =>
   bytes.length >= magic.length && magic.every((b, i) => bytes[i] === b);
 
 /**
@@ -91,7 +91,7 @@ const opensWith = (bytes: Uint8Array, magic: readonly number[]): boolean =>
  * never more than `cap` bytes read. A link, a directory or a missing file is a
  * DossierError with `what`.
  */
-function readCapped(path: string, cap: number, what: string): Uint8Array {
+function readFileCapped(path: string, cap: number, what: string): Uint8Array {
   let size: number;
   try {
     const st = lstatSync(path);
@@ -125,7 +125,7 @@ function readCapped(path: string, cap: number, what: string): Uint8Array {
 }
 
 /** Lines of a text: 0 when empty, else its newlines plus one for a last line with none. */
-function lineCount(bytes: Uint8Array): number {
+function countLines(bytes: Uint8Array): number {
   if (bytes.length === 0) return 0;
   let n = 0;
   for (const b of bytes) if (b === 0x0a) n++;
@@ -133,14 +133,14 @@ function lineCount(bytes: Uint8Array): number {
 }
 
 /** A Markdown fence one backtick longer than the longest run in `body`, three at least. */
-function fenceFor(body: string): string {
+function fenceForBody(body: string): string {
   let longest = 0;
   for (const run of body.match(/`+/g) ?? []) longest = Math.max(longest, run.length);
   return '`'.repeat(Math.max(3, longest + 1));
 }
 
 /** The fence a file's extension is shown with. */
-function languageOf(path: string): string {
+function languageForPath(path: string): string {
   const ext = path.slice(path.lastIndexOf('.') + 1);
   return ext === 'mjs' ? 'js' : ext;
 }
@@ -163,7 +163,7 @@ export function canonicalJson(value: unknown): string {
     if (proto !== Object.prototype && proto !== null) throw new TypeError('canonicalJson: only plain objects and arrays');
     const o = value as Record<string, unknown>;
     return `{${Object.keys(o)
-      .sort(byCodeUnit)
+      .sort(compareCodeUnits)
       .map((k) => `${JSON.stringify(k)}:${canonicalJson(o[k])}`)
       .join(',')}}`;
   }
@@ -173,7 +173,7 @@ export function canonicalJson(value: unknown): string {
 // ---------------------------------------------------------------- the dashboard walk
 
 /** One file of the dashboard tree: its path relative to the directory, and its size in bytes. */
-interface DashFile {
+interface DashboardFile {
   path: string;
   size: number;
 }
@@ -184,7 +184,7 @@ interface DashFile {
  * file whose name a dossier refuses, an entry that is neither a file nor a
  * directory, and, when the caps are given, too many files or bytes in all.
  */
-function dashboardFiles(root: string, caps: { max_files: number; max_bytes: number } | null): DashFile[] {
+function listDashboardFiles(root: string, caps: { max_files: number; max_bytes: number } | null): DashboardFile[] {
   let st: import('node:fs').Stats;
   try {
     st = lstatSync(root);
@@ -192,7 +192,7 @@ function dashboardFiles(root: string, caps: { max_files: number; max_bytes: numb
     throw new DossierError('buildDossier: no dashboard/ directory: the page and its source are what the judge reads');
   }
   if (!st.isDirectory()) throw new DossierError('buildDossier: dashboard is not a directory');
-  const out: DashFile[] = [];
+  const out: DashboardFile[] = [];
   let bytes = 0;
   const stack: string[] = [''];
   while (stack.length > 0) {
@@ -222,10 +222,35 @@ function dashboardFiles(root: string, caps: { max_files: number; max_bytes: numb
       }
     }
   }
-  return out.sort((a, b) => byCodeUnit(a.path, b.path));
+  return out.sort((a, b) => compareCodeUnits(a.path, b.path));
 }
 
 // ---------------------------------------------------------------- the dossier
+
+/**
+ * The dossier's images: every screenshot in `shotsDir`, in name order, each
+ * checked to be a whole PNG or JPEG under the byte cap. Refuses too many
+ * screenshots, a bad name, or a file that is not a PNG or JPEG.
+ */
+function loadScreenshotImages(
+  shotsDir: string,
+  shotNames: string[],
+  countCap: { n: number; whose: string },
+  byteCap: { n: number; whose: string },
+): { name: string; media_type: string; sha256: string; base64: string }[] {
+  if (shotNames.length > countCap.n) {
+    throw new DossierError(`buildDossier: screenshots/ holds ${shotNames.length} files, over the ${countCap.n} ${countCap.whose}`);
+  }
+  return shotNames.map((name) => {
+    if (!PLAIN_NAME.test(name)) {
+      throw new DossierError(`buildDossier: screenshots/${name}: a name is letters, digits and . _ -, 1 to 128 characters, not starting with . or -`);
+    }
+    const bytes = readFileCapped(join(shotsDir, name), byteCap.n, `screenshots/${name}`);
+    const media_type = startsWithMagic(bytes, PNG_MAGIC) ? 'image/png' : startsWithMagic(bytes, JPEG_MAGIC) ? 'image/jpeg' : null;
+    if (media_type === null) throw new DossierError(`buildDossier: screenshots/${name} is neither a PNG nor a JPEG`);
+    return { name, media_type, sha256: sha256HexDigest(bytes), base64: Buffer.from(bytes).toString('base64') };
+  });
+}
 
 /**
  * The dossier (makefun/dossier/v1) of a dashboard directory, as canonical JSON
@@ -242,8 +267,10 @@ export function buildDossier(dir: string, caps: DossierCaps): Uint8Array {
     throw new DossierError(`buildDossier: caps.text_max_bytes must be a positive integer, not ${String(max)}`);
   }
 
-  let maxImages = { n: DOSSIER_MAX_IMAGES, whose: 'a dossier holds' };
-  let maxImageBytes = { n: DOSSIER_MAX_BYTES, whose: 'a dossier holds' };
+  // The caps only refuse: the tighter of the dossier's own caps and the
+  // caller's caps is the one that binds.
+  let imageCountCap = { n: DOSSIER_MAX_IMAGES, whose: 'a dossier holds' };
+  let imageByteCap = { n: DOSSIER_MAX_BYTES, whose: 'a dossier holds' };
   if (caps.screenshots !== undefined) {
     const s = caps.screenshots as { max?: unknown; max_bytes?: unknown } | null;
     if (typeof s !== 'object' || s === null) throw new DossierError('buildDossier: caps.screenshots must be an object {max, max_bytes}');
@@ -253,8 +280,8 @@ export function buildDossier(dir: string, caps: DossierCaps): Uint8Array {
         throw new DossierError(`buildDossier: caps.screenshots.${k} must be a positive integer, not ${String(v)}`);
       }
     }
-    if ((s.max as number) < maxImages.n) maxImages = { n: s.max as number, whose: 'caps.screenshots.max allows' };
-    if ((s.max_bytes as number) < maxImageBytes.n) maxImageBytes = { n: s.max_bytes as number, whose: 'caps.screenshots.max_bytes allows' };
+    if ((s.max as number) < imageCountCap.n) imageCountCap = { n: s.max as number, whose: 'caps.screenshots.max allows' };
+    if ((s.max_bytes as number) < imageByteCap.n) imageByteCap = { n: s.max_bytes as number, whose: 'caps.screenshots.max_bytes allows' };
   }
   let fileCaps: { max_files: number; max_bytes: number } | null = null;
   if (caps.dashboard !== undefined) {
@@ -269,7 +296,7 @@ export function buildDossier(dir: string, caps: DossierCaps): Uint8Array {
     fileCaps = { max_files: d.max_files as number, max_bytes: d.max_bytes as number };
   }
 
-  const files = dashboardFiles(join(dir, 'dashboard'), fileCaps);
+  const files = listDashboardFiles(join(dir, 'dashboard'), fileCaps);
 
   const shotsDir = join(dir, 'screenshots');
   let shotNames: string[];
@@ -277,7 +304,7 @@ export function buildDossier(dir: string, caps: DossierCaps): Uint8Array {
     shotNames = readdirSync(shotsDir, { withFileTypes: true })
       .filter((e) => e.isFile() && !e.name.startsWith('.'))
       .map((e) => e.name)
-      .sort(byCodeUnit);
+      .sort(compareCodeUnits);
   } catch (err) {
     if ((err as { code?: string }).code === 'ENOENT') {
       throw new DossierError('buildDossier: no screenshots/ directory: the first screenshot is the cover');
@@ -285,20 +312,9 @@ export function buildDossier(dir: string, caps: DossierCaps): Uint8Array {
     throw new DossierError('buildDossier: screenshots/ cannot be read');
   }
   if (shotNames.length === 0) throw new DossierError('buildDossier: screenshots/ holds no image: the first is the cover');
-  if (shotNames.length > maxImages.n) {
-    throw new DossierError(`buildDossier: screenshots/ holds ${shotNames.length} files, over the ${maxImages.n} ${maxImages.whose}`);
-  }
-  const images = shotNames.map((name) => {
-    if (!PLAIN_NAME.test(name)) {
-      throw new DossierError(`buildDossier: screenshots/${name}: a name is letters, digits and . _ -, 1 to 128 characters, not starting with . or -`);
-    }
-    const bytes = readCapped(join(shotsDir, name), maxImageBytes.n, `screenshots/${name}`);
-    const media_type = opensWith(bytes, PNG_MAGIC) ? 'image/png' : opensWith(bytes, JPEG_MAGIC) ? 'image/jpeg' : null;
-    if (media_type === null) throw new DossierError(`buildDossier: screenshots/${name} is neither a PNG nor a JPEG`);
-    return { name, media_type, sha256: sha256Hex(bytes), base64: Buffer.from(bytes).toString('base64') };
-  });
+  const images = loadScreenshotImages(shotsDir, shotNames, imageCountCap, imageByteCap);
 
-  const head = [
+  const dashboardHead = [
     '## Dashboard',
     '',
     `Files: ${files.length} (${files.reduce((n, f) => n + f.size, 0)} bytes)`,
@@ -310,41 +326,41 @@ export function buildDossier(dir: string, caps: DossierCaps): Uint8Array {
   ].join('\n');
 
   // The files whose contents are shown, by path; a binary file is named in the Dashboard block only.
-  const shown = files.filter((f) => TEXT_FILE.test(f.path));
-  interface Section {
+  const shownFiles = files.filter((f) => TEXT_FILE.test(f.path));
+  interface TextSection {
     heading: string;
-    code: ShownFile | null;
+    code: ShownTextFile | null;
     size: number;
     bytes: number;
   }
-  const sections: Section[] = shown.map((f) => {
-    const bytes = readCapped(join(dir, 'dashboard', f.path), DOSSIER_MAX_BYTES, `dashboard/${f.path}`);
-    const lines = lineCount(bytes);
+  const sections: TextSection[] = shownFiles.map((f) => {
+    const bytes = readFileCapped(join(dir, 'dashboard', f.path), DOSSIER_MAX_BYTES, `dashboard/${f.path}`);
+    const lines = countLines(bytes);
     const heading = `### ${f.path}\n\n${bytes.length} bytes, ${lines} line${lines === 1 ? '' : 's'}\n\n`;
-    if (bytes.length === 0) return { heading, code: null, size: byteLength(heading), bytes: 0 };
+    if (bytes.length === 0) return { heading, code: null, size: utf8ByteLength(heading), bytes: 0 };
     const text = new TextDecoder('utf-8').decode(bytes);
-    const fence = fenceFor(text);
-    const lang = languageOf(f.path);
+    const fence = fenceForBody(text);
+    const lang = languageForPath(f.path);
     const block = `${fence}${lang}\n${text}${text.endsWith('\n') ? '' : '\n'}${fence}\n\n`;
-    return { heading, code: { bytes, text, fence, lang, block, blockBytes: byteLength(block), lines }, size: byteLength(heading) + byteLength(block), bytes: bytes.length };
+    return { heading, code: { bytes, text, fence, lang, block, blockBytes: utf8ByteLength(block), lines }, size: utf8ByteLength(heading) + utf8ByteLength(block), bytes: bytes.length };
   });
 
-  // restBytes[k]: the bytes of the shown files after section k.
-  const restBytes = new Array<number>(sections.length + 1).fill(0);
-  for (let k = sections.length - 1; k >= 0; k--) restBytes[k] = restBytes[k + 1]! + (k + 1 < sections.length ? sections[k + 1]!.bytes : 0);
+  // bytesAfterSection[k]: the bytes of the shown files after section k.
+  const bytesAfterSection = new Array<number>(sections.length + 1).fill(0);
+  for (let k = sections.length - 1; k >= 0; k--) bytesAfterSection[k] = bytesAfterSection[k + 1]! + (k + 1 < sections.length ? sections[k + 1]!.bytes : 0);
 
-  const cutLine = (count: number, bytes: number): string =>
+  const cutLineFor = (count: number, bytes: number): string =>
     `[Cut at ${max} bytes: ${count} file${count === 1 ? '' : 's'} and ${bytes} bytes left out.]\n`;
-  let out = head;
-  let used = byteLength(head);
-  if (used + byteLength(cutLine(0, 0)) > max) {
+  let out = dashboardHead;
+  let used = utf8ByteLength(dashboardHead);
+  if (used + utf8ByteLength(cutLineFor(0, 0)) > max) {
     throw new DossierError(`buildDossier: caps.text_max_bytes ${max} cannot hold even the Dashboard block and the cut line`);
   }
   let kept = 0;
   for (; kept < sections.length; kept++) {
     const section = sections[kept]!;
     const restCount = sections.length - kept - 1;
-    const tail = restCount === 0 ? 0 : byteLength(cutLine(restCount, restBytes[kept]!));
+    const tail = restCount === 0 ? 0 : utf8ByteLength(cutLineFor(restCount, bytesAfterSection[kept]!));
     if (used + section.size + tail > max) break;
     out += section.code === null ? section.heading : `${section.heading}${section.code.block}`;
     used += section.size;
@@ -354,14 +370,14 @@ export function buildDossier(dir: string, caps: DossierCaps): Uint8Array {
     // line that fits, then nothing more.
     const first = sections[kept]!;
     const restCount = sections.length - kept - 1;
-    const after = restBytes[kept]!;
+    const after = bytesAfterSection[kept]!;
     const part =
       first.code === null
         ? null
-        : fileHead(first.heading, first.code, max - used, (hidden) => cutLine(restCount, after + hidden));
-    out += part ?? cutLine(restCount + 1, after + first.bytes);
+        : cutFileHead(first.heading, first.code, max - used, (hidden) => cutLineFor(restCount, after + hidden));
+    out += part ?? cutLineFor(restCount + 1, after + first.bytes);
   }
-  if (byteLength(out) > max) {
+  if (utf8ByteLength(out) > max) {
     throw new DossierError(`buildDossier: caps.text_max_bytes ${max} cannot hold even the Dashboard block and the cut line`);
   }
 
@@ -374,7 +390,7 @@ export function buildDossier(dir: string, caps: DossierCaps): Uint8Array {
 }
 
 /** A shown file as the dossier shows it. */
-interface ShownFile {
+interface ShownTextFile {
   bytes: Uint8Array;
   text: string;
   fence: string;
@@ -395,20 +411,20 @@ interface ShownFile {
  * never inside a UTF-8 sequence nor a replacement character's bytes, so no
  * character is split, and a line's shown bytes are those of its text.
  */
-function fileHead(heading: string, code: ShownFile, room: number, tail: (hidden: number) => string): string | null {
+function cutFileHead(heading: string, code: ShownTextFile, room: number, tail: (hidden: number) => string): string | null {
   const total = code.lines;
   const lines = code.text.split('\n');
   const open = `${code.fence}${code.lang}\n`;
   const close = `${code.fence}\n\n`;
   const note = (k: number): string => `[${total - k} of this file's ${total} lines not shown.]\n`;
-  const fixed = byteLength(heading) + byteLength(open) + byteLength(close);
+  const fixed = utf8ByteLength(heading) + utf8ByteLength(open) + utf8ByteLength(close);
   let best = 0;
   let shown = 0;
   let raw = 0;
   for (let k = 1; k < total; k++) {
-    shown += byteLength(lines[k - 1]!) + 1;
+    shown += utf8ByteLength(lines[k - 1]!) + 1;
     raw = code.bytes.indexOf(0x0a, raw) + 1;
-    if (fixed + shown + byteLength(note(k)) + byteLength(tail(code.bytes.length - raw)) <= room) best = k;
+    if (fixed + shown + utf8ByteLength(note(k)) + utf8ByteLength(tail(code.bytes.length - raw)) <= room) best = k;
   }
   if (best === 0) return null;
   let rawEnd = 0;
