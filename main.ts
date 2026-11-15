@@ -11,7 +11,7 @@
 // --output is where the files go; the snapshot is read from --input or from
 // /input/snapshot.json (MAKEFUN_INPUT_DIR and MAKEFUN_OUTPUT_DIR still set the
 // defaults, as in the starter).
-import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { buildDossier } from './vendor/makefun-board.ts';
 import { MODEL, MODEL_VERSION, boardIssue, buildRadar, dataScript, parseSnapshot } from './lib/model.ts';
@@ -90,11 +90,15 @@ function main(): void {
 
   const top = board[0]!;
   const low = board[board.length - 1]!;
+  const verdicts = { FARM: 0, THIN: 0, SKIP: 0 };
+  for (const r of board) verdicts[r.farm_economics.verdict]++;
   console.log(`board: ${board.length} rows (${snapshot.watchlist.length} watchlist + ${radar.early_size} early)`);
   console.log(`  live set aside: ${radar.live_size} tokened protocols, by market cap`);
   console.log(`  top: ${top.name} ($${top.implied_value_usd.toLocaleString('en-US')})`);
   console.log(`  bottom: ${low.name} ($${low.implied_value_usd.toLocaleString('en-US')})`);
   console.log(`  model: ${MODEL_VERSION}; global multiple ${radar.global_multiple}; ${radar.comparables.length} categories with comparables`);
+  console.log(`  backtest: LOO n=${radar.backtest.n}, median error x${radar.backtest.median_error_factor}, within 2x ${(radar.backtest.within_2x * 100).toFixed(0)}%, band x${radar.backtest.band_factor}`);
+  console.log(`  verdicts: FARM ${verdicts.FARM}, THIN ${verdicts.THIN}, SKIP ${verdicts.SKIP}`);
   console.log(`  dashboard: ${dashboardFiles} files; screenshots: ${screenshotCount} images`);
   console.log(`  wrote: ${join(output, 'board.json')}, ${join(output, 'data.js')}, ${join(output, 'dossier.json')}`);
 }
