@@ -1,106 +1,113 @@
-// main.ts: the token radar's entrypoint (Node 22, no dependencies, TypeScript).
+// main.ts — token-radar-01 entrypoint.
 //
-// Reads /input/snapshot.json, writes the ranked board to /output/board.json,
-// the dashboard's data to /output/data.js, copies dashboard/ and screenshots/
-// to /output, and writes /output/dossier.json.
+// Reads one sealed DefiLlama snapshot, runs the radar model over it, and
+// writes the entry's output directory:
 //
-//   node main.ts                          the sandbox's defaults, /input and /output
-//   node main.ts --input snap.json        a local snapshot path
-//   node main.ts --output out             a local output directory
+//   board.json     the ranked board (pretty JSON, one row per protocol)
+//   data.js        the dashboard's whole dataset as window.RADAR
+//   dashboard/     a copy of this repo's dashboard/ (the page's source)
+//   screenshots/   a copy of this repo's screenshots/ (the cover images)
+//   dossier.json   the make.fun dossier of the output directory
 //
-// --output is where the files go; the snapshot is read from --input or from
-// /input/snapshot.json (MAKEFUN_INPUT_DIR and MAKEFUN_OUTPUT_DIR still set the
-// defaults, as in the starter).
-import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+// The dossier is built last, from the output directory itself, so the copy
+// of the dossier the scorer rebuilds from the same directory is identical.
+//
+// Usage:
+//   node main.ts [--input snapshot.json] [--output dir]
+// With no flags the grader's paths apply: /input/snapshot.json -> /output.
+
+import { cpSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 import { buildDossier } from './vendor/makefun-board.ts';
-import { MODEL, MODEL_VERSION, boardIssue, buildRadar, dataScript, parseSnapshot } from './lib/model.ts';
+import { boardIssue, buildRadar, dataScript, parseSnapshot } from './lib/model.ts';
 
-const inputDir = process.env.MAKEFUN_INPUT_DIR ?? '/input';
-const outputDir = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
+// The repo root: the directory this file lives in. The dashboard and the
+// screenshots are copied from here, so the run works from any cwd.
+const REPO_ROOT = dirname(fileURLToPath(import.meta.url));
 
-interface Flags {
-  input: string | null;
-  output: string | null;
+// The grader's paths when no flags are given.
+const FALLBACK_INPUT = '/input/snapshot.json';
+const FALLBACK_OUTPUT = '/output';
+
+// The dossier's text cap, in UTF-8 bytes: the same cap the gate rebuilds
+// with, so the dossier written here is the dossier the gate expects.
+const DOSSIER_TEXT_MAX_BYTES = 65536;
+
+interface CliOptions {
+  inputPath: string;
+  outputDir: string;
 }
 
-function parseFlags(argv: string[]): Flags {
-  const flags: Flags = { input: null, output: null };
+// One flag, in either spelling: --input path or --input=path. Anything else
+// that starts with -- is rejected rather than silently ignored.
+function parseCli(argv: string[]): CliOptions {
+  const options: CliOptions = { inputPath: FALLBACK_INPUT, outputDir: FALLBACK_OUTPUT };
   for (let i = 0; i < argv.length; i++) {
-    const a = argv[i]!;
-    if (a === '--input' && i + 1 < argv.length) flags.input = argv[++i]!;
-    else if (a === '--output' && i + 1 < argv.length) flags.output = argv[++i]!;
-    else throw new Error(`unknown argument: ${a}`);
+    const arg = argv[i]!;
+    const eq = arg.indexOf('=');
+    const flag = eq === -1 ? arg : arg.slice(0, eq);
+    const inline = eq === -1 ? null : arg.slice(eq + 1);
+    const takeValue = (): string => {
+      if (inline !== null) return inline;
+      const next = argv[i + 1];
+      if (next === undefined || next.startsWith('--')) {
+        throw new Error(`main.ts: ${flag} needs a value`);
+      }
+      i++;
+      return next;
+    };
+    if (flag === '--input') options.inputPath = takeValue();
+    else if (flag === '--output') options.outputDir = takeValue();
+    else throw new Error(`main.ts: unknown flag ${flag}`);
   }
-  return flags;
+  return options;
 }
 
-/** The dashboard and screenshots as the entry ships them: main.ts's own directory. */
-function entryDir(): string {
-  return resolve(join(import.meta.url.replace(/^file:\/\//, ''), '..'));
-}
-
-/** Copies one plain file tree into another, quietly; a missing source directory is refused. */
-function copyTreeFiles(src: string, dst: string): number {
-  let n = 0;
-  const walkTree = (a: string, b: string): void => {
-    for (const e of readdirSync(a, { withFileTypes: true })) {
-      const s = join(a, e.name);
-      const d = join(b, e.name);
-      if (e.isDirectory()) {
-        mkdirSync(d, { recursive: true });
-        walkTree(s, d);
-      } else if (e.isFile()) {
-        copyFileSync(s, d);
-        n++;
-      } else throw new Error(`${s} is neither a file nor a directory`);
-    }
-  };
-  if (!existsSync(src)) throw new Error(`no ${src}: the dashboard ships in the entry`);
-  mkdirSync(dst, { recursive: true });
-  walkTree(src, dst);
-  return n;
-}
-
-/** The board's own gate, before anything is written: coverage, ranks, order, farm steps, size. */
-function assertBoardSize(board: { length: number }): void {
-  if (board.length < 100) throw new Error(`the board holds ${board.length} rows, fewer than the gate's 100`);
-  if (board.length > 4_000) throw new Error(`the board holds ${board.length} rows, more than the gate's 4,000`);
+// The output directory, ready to receive files: the root plus the two
+// subdirectories the dossier reads back.
+function prepareOutputDir(outputDir: string): void {
+  mkdirSync(outputDir, { recursive: true });
+  mkdirSync(join(outputDir, 'dashboard'), { recursive: true });
+  mkdirSync(join(outputDir, 'screenshots'), { recursive: true });
 }
 
 function main(): void {
-  const flags = parseFlags(process.argv.slice(2));
-  const input = flags.input ?? join(inputDir, 'snapshot.json');
-  const output = resolve(flags.output ?? outputDir);
-  const here = entryDir();
+  const { inputPath, outputDir } = parseCli(process.argv.slice(2));
 
-  const snapshot = parseSnapshot(readFileSync(input, 'utf8'));
-  const { board, radar } = buildRadar(snapshot, MODEL);
+  // The snapshot, parsed and refused unless it is the shape the model scores.
+  const snapshot = parseSnapshot(readFileSync(inputPath, 'utf8'));
 
+  // The board and the dashboard's dataset, from the snapshot alone.
+  const { board, radar } = buildRadar(snapshot);
+
+  // The gate's own board rule, applied before anything is written.
   const issue = boardIssue(board, snapshot);
-  if (issue !== null) throw new Error(`the board fails its own gate: ${issue}`);
-  assertBoardSize(board);
+  if (issue !== null) throw new Error(`main.ts: board rejected: ${issue}`);
 
-  mkdirSync(output, { recursive: true });
-  writeFileSync(join(output, 'board.json'), `${JSON.stringify(board, null, 2)}\n`);
-  writeFileSync(join(output, 'data.js'), dataScript(radar));
-  const dashboardFiles = copyTreeFiles(join(here, 'dashboard'), join(output, 'dashboard'));
-  const screenshotCount = existsSync(join(here, 'screenshots')) ? copyTreeFiles(join(here, 'screenshots'), join(output, 'screenshots')) : 0;
-  writeFileSync(join(output, 'dossier.json'), buildDossier(output, { text_max_bytes: 65536 }));
+  prepareOutputDir(outputDir);
 
-  const top = board[0]!;
-  const low = board[board.length - 1]!;
-  const verdicts = { FARM: 0, THIN: 0, SKIP: 0 };
-  for (const r of board) verdicts[r.farm_economics.verdict]++;
-  console.log(`board: ${board.length} rows (${snapshot.watchlist.length} watchlist + ${radar.early_size} early)`);
-  console.log(`  live set aside: ${radar.live_size} tokened protocols, by market cap`);
-  console.log(`  top: ${top.name} ($${top.implied_value_usd.toLocaleString('en-US')})`);
-  console.log(`  bottom: ${low.name} ($${low.implied_value_usd.toLocaleString('en-US')})`);
-  console.log(`  model: ${MODEL_VERSION}; global multiple ${radar.global_multiple}; ${radar.comparables.length} categories with comparables`);
-  console.log(`  backtest: LOO n=${radar.backtest.n}, median error x${radar.backtest.median_error_factor}, within 2x ${(radar.backtest.within_2x * 100).toFixed(0)}%, band x${radar.backtest.band_factor}`);
-  console.log(`  verdicts: FARM ${verdicts.FARM}, THIN ${verdicts.THIN}, SKIP ${verdicts.SKIP}`);
-  console.log(`  dashboard: ${dashboardFiles} files; screenshots: ${screenshotCount} images`);
-  console.log(`  wrote: ${join(output, 'board.json')}, ${join(output, 'data.js')}, ${join(output, 'dossier.json')}`);
+  // The ranked board, pretty-printed; the file ends with a newline.
+  writeFileSync(join(outputDir, 'board.json'), `${JSON.stringify(board, null, 2)}\n`, 'utf8');
+
+  // The dashboard's dataset, as one script the page loads with no fetch.
+  writeFileSync(join(outputDir, 'data.js'), dataScript(radar), 'utf8');
+
+  // The page's source and the cover images, copied whole from this repo.
+  cpSync(join(REPO_ROOT, 'dashboard'), join(outputDir, 'dashboard'), { recursive: true });
+  cpSync(join(REPO_ROOT, 'screenshots'), join(outputDir, 'screenshots'), { recursive: true });
+
+  // The dossier, built from the finished output directory so it describes
+  // exactly what was written — dashboard source, screenshots and all.
+  const dossier = buildDossier(outputDir, { text_max_bytes: DOSSIER_TEXT_MAX_BYTES });
+  writeFileSync(join(outputDir, 'dossier.json'), dossier);
+
+  console.log(
+    `token-radar: ${board.length} rows (${radar.above_floor_size} above the floor, ` +
+      `${radar.early_size} early), ${radar.live_size} live tokens set aside, ` +
+      `wrote ${outputDir}`,
+  );
 }
 
 main();
