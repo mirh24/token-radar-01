@@ -1,27 +1,46 @@
 <!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Token Radar — which protocols still record no token</title>
-<link rel="stylesheet" href="app.css">
+  <meta charset="utf-8">
+  <!-- A phone-wide page still lays the board out full width. -->
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Token Radar — pre-token launches, ranked by implied value</title>
+  <meta name="description" content="Every protocol that records no token, ranked by what its launch would be worth.">
+  <link rel="stylesheet" href="app.css">
 </head>
 <body>
-<header class="top">
-  <div class="brand">TOKEN RADAR</div>
-  <div class="brand-sub">Which protocols still record no token — and what a launch is worth</div>
-  <div class="meta" id="meta"></div>
-</header>
-<main>
-  <section class="lede" id="lede"></section>
-  <section class="strip" id="strip"></section>
-  <section class="controls" id="controls"></section>
-  <section class="board" id="board"></section>
-  <section class="model" id="model"></section>
-  <footer class="foot" id="foot"></footer>
-</main>
-<dialog id="detail"></dialog>
-<script src="../data.js"></script>
-<script src="app.js"></script>
+  <!-- The masthead is static: the app fills in the meta line below it. -->
+  <header class="masthead">
+    <p class="brand">Token Radar</p>
+    <p class="tagline">Which protocols still record no token — and what a launch is worth</p>
+    <p id="meta" class="meta-line"></p>
+  </header>
+
+  <main class="page">
+    <!-- The lede: the headline count, the facts, and how a launch is priced. -->
+    <section id="lede" class="lede" aria-label="Summary"></section>
+
+    <!-- Filters and tabs; the app builds the controls into this box. -->
+    <div id="controls" class="controls" aria-label="Board filters"></div>
+
+    <!-- The board itself: above-the-floor rows first, early finds after. -->
+    <section id="board" class="board" aria-label="Pre-token board"></section>
+
+    <!-- The top 10 by implied launch value, as bars. -->
+    <section id="strip" class="strip" aria-label="Top 10 by implied launch value"></section>
+
+    <!-- How the ranking works, how it is tested, and the family table. -->
+    <section id="model" class="model" aria-label="Methodology"></section>
+  </main>
+
+  <footer id="foot" class="foot"></footer>
+
+  <!-- One protocol's detail view; the app opens it as a modal dialog. -->
+  <dialog id="detail" class="detail"></dialog>
+
+  <!-- The dataset first, then the page: the page reads window.RADAR on load,
+       so the data script must come before it and both after the elements. -->
+  <script src="../data.js"></script>
+  <script src="app.js"></script>
 </body>
 </html>
