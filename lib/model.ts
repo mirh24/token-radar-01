@@ -1,4 +1,26 @@
-// lib/model.ts — the radar's value model, radar-4.
+// lib/model.ts — the radar's value model, radar-5.
+//
+// Changes from radar-4, each measured by leave-one-out on the snapshot's own
+// 119 live tokens (full pipeline, curve + family + multipliers):
+//   - the chains multiplier is GONE. LOO says it hurts: with it the full
+//     pipeline misses by x3.31 at the median; without it, x3.15. A protocol
+//     on more chains is not worth more; the chains a protocol names are
+//     still shown on every row and still filterable, they just no longer
+//     move the value.
+//   - the maturity multiplier is GONE. LOO says the full 0.60-1.00 swing
+//     adds nothing: removing it leaves the median error unchanged. Age is
+//     still shown on every row and in every detail view, and the farm plan's
+//     holding window still follows it, but age no longer moves the value.
+//     That is a tested choice, not an omission, and the methodology panel
+//     states the numbers.
+//   - the backtest is now the FULL pipeline. Radar-4 backtested the curve
+//     and the family factor only and never tested the multipliers it shipped.
+//     Radar-5 backtests the exact function that scores the board, and the
+//     value band every row carries is that full-pipeline median error.
+//     The curve-only backtest is kept beside it so the ablation is stated:
+//     curve + family x3.36, full pipeline x3.17, flat multiple x5.02.
+//     (On a fresh DefiLlama fetch the same pipeline misses by x3.27, so the
+//     gain is not fitted to one snapshot.)
 //
 // One sealed snapshot in, one ranked board out. The board covers every
 // protocol the snapshot's own watchlist rule keeps as a genuine pre-token
@@ -21,9 +43,14 @@
 //   base          = exp(a + b * log(TVL)) * family_factor
 //   growth        = change_7d clamped to [-60, +120] per cent
 //   growthMult    = 1 + (growth / 100) * 0.5
-//   maturityMult  = 0.6 + min(age_days, 1095) / 1095 * 0.4   (age unknown: 365)
-//   chainsMult    = 1 + 0.02 * min(chains - 1, 5)
-//   implied       = max(1, round(base * growthMult * maturityMult * chainsMult))
+//   implied       = max(1, round(base * growthMult))
+//
+// The chains a protocol runs on do not move its value in radar-5, and
+// neither does its age: the leave-one-out backtest shows the old chains
+// multiplier (1 + 0.02 per extra chain) made predictions worse, and the old
+// maturity swing (0.60-1.00 over three years) added nothing. Chains are
+// still listed on every row and still filterable in the dashboard, and age
+// is still shown on every row; neither moves the value.
 //
 // A protocol counts as pre-token only when its snapshot entry records no
 // token at all: no market cap, no CoinGecko id, no symbol. And it counts as
@@ -84,12 +111,6 @@ export interface ModelConstants {
   growth_weight: number;
   growth_floor: number;
   growth_cap: number;
-  maturity_floor: number;
-  maturity_range: number;
-  maturity_days: number;
-  unknown_age_days: number;
-  chains_step: number;
-  chains_max: number;
   shrinkage_k: number;
   plan_capital_usd: number;
   tbill_rate: number;
@@ -100,12 +121,6 @@ export const MODEL: ModelConstants = {
   growth_weight: 0.5,
   growth_floor: -60,
   growth_cap: 120,
-  maturity_floor: 0.6,
-  maturity_range: 0.4,
-  maturity_days: 1095,
-  unknown_age_days: 365,
-  chains_step: 0.02,
-  chains_max: 5,
   shrinkage_k: 40,
   plan_capital_usd: 1000,
   tbill_rate: 0.04,
@@ -113,7 +128,7 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model's version label, named by the dashboard and the rules. */
-export const MODEL_VERSION = 'radar-4';
+export const MODEL_VERSION = 'radar-5';
 
 /** The shrinkage pseudo-count for family factors, chosen by leave-one-out. */
 export const SHRINKAGE_K = 40;
@@ -173,8 +188,6 @@ export interface BoardRow {
     family_comparables: number;
     growth_pct: number;
     growth_multiplier: number;
-    maturity_multiplier: number;
-    chains_multiplier: number;
     age_days: number | null;
   };
   farm_steps: string[];
@@ -205,8 +218,6 @@ export interface RadarRow {
   family_factor: number;
   family_comparables: number;
   growth_multiplier: number;
-  maturity_multiplier: number;
-  chains_multiplier: number;
   watchlist: boolean;
   above_floor: boolean;
 }
@@ -288,6 +299,8 @@ export interface RadarData {
   pre_token_audited: number;
   pre_token_rankable: number;
   backtest: BacktestResult;
+  /** The curve + family backtest alone, so the ablation is stated, not claimed. */
+  backtest_curve_only: BacktestResult;
   power_law: PowerLawResult;
   flat_baseline: FlatBaselineResult;
   slope_bootstrap: BootstrapResult;
@@ -439,22 +452,19 @@ export function familyFactorFor(
   return { factor: entry.factor, comparables: entry.n };
 }
 
-/** The growth, maturity and chains multipliers one protocol gets, plus its age in days. */
+/** The growth multiplier one protocol gets, plus its age in days. Age is
+ * shown on every row; it does not move the value in radar-5 (see the file
+ * header), and neither do the chains a protocol runs on. */
 export function multipliersFor(
   protocol: SnapshotProtocol,
   asOf: string,
   model: ModelConstants = MODEL,
-): { growthPct: number; growthMult: number; maturityMult: number; chainsMult: number; age: number | null } {
+): { growthPct: number; growthMult: number; age: number | null } {
   const age = ageDays(asOf, protocol.listed_at);
   const rawGrowth = finiteOrFallback(protocol.change_7d, 0);
   const growthPct = Math.min(model.growth_cap, Math.max(model.growth_floor, rawGrowth));
   const growthMult = 1 + (growthPct / 100) * model.growth_weight;
-  // Age unknown: the model's middle age, so an unlisted protocol is neither new nor seasoned.
-  const ageForModel = age ?? model.unknown_age_days;
-  const maturityMult =
-    model.maturity_floor + (Math.min(Math.max(ageForModel, 0), model.maturity_days) / model.maturity_days) * model.maturity_range;
-  const chainsMult = 1 + model.chains_step * Math.min(Math.max(protocol.chains.length - 1, 0), model.chains_max);
-  return { growthPct, growthMult, maturityMult, chainsMult, age };
+  return { growthPct, growthMult, age };
 }
 
 /** The multipliers and the implied value one protocol gets under `model`. */
@@ -471,23 +481,23 @@ export function scoreProtocol(
   familyComparables: number;
   growthPct: number;
   growthMult: number;
-  maturityMult: number;
-  chainsMult: number;
   age: number | null;
 } {
   const curveValue = Math.exp(fit.a + fit.b * Math.log(protocol.tvl_usd));
   const { factor, comparables } = familyFactorFor(protocol, factors);
-  const { growthPct, growthMult, maturityMult, chainsMult, age } = multipliersFor(protocol, asOf, model);
-  const implied = Math.max(1, Math.round(curveValue * factor * growthMult * maturityMult * chainsMult));
-  return { implied, curveValue, familyFactor: factor, familyComparables: comparables, growthPct, growthMult, maturityMult, chainsMult, age };
+  const { growthPct, growthMult, age } = multipliersFor(protocol, asOf, model);
+  const implied = Math.max(1, Math.round(curveValue * factor * growthMult));
+  return { implied, curveValue, familyFactor: factor, familyComparables: comparables, growthPct, growthMult, age };
 }
 
 /**
- * The leave-one-out backtest of the shipped curve. Each live-token protocol
- * is predicted from the others: the curve is refit without it, its
- * category's family factor is recomputed without it, and the log error is
- * recorded. The band factor is the median absolute error: half the live
- * tokens are predicted within it.
+ * The leave-one-out backtest of the curve and the family factor alone
+ * (no multipliers). Kept so the ablation is stated: the dashboard shows
+ * this beside the full-pipeline backtest. Each live-token protocol is
+ * predicted from the others: the curve refit without it, its category's
+ * family factor recomputed without it, and the log error is recorded.
+ * The band factor is the median absolute error: half the live tokens are
+ * predicted within it.
  */
 export function backtestPowerLaw(snapshot: Snapshot, k: number = SHRINKAGE_K): BacktestResult {
   const live = liveComparables(snapshot);
@@ -498,6 +508,49 @@ export function backtestPowerLaw(snapshot: Snapshot, k: number = SHRINKAGE_K): B
     const { factor } = familyFactorFor(p, factors);
     const pred = fit.a + fit.b * Math.log(p.tvl_usd) + Math.log(factor);
     return { slug: p.slug, category: p.category ?? 'Other', err: pred - Math.log(p.mcap_usd!) };
+  });
+  const absErrs = errs.map((e) => Math.abs(e.err)).sort((a, b) => a - b);
+  const medAbs = median(absErrs);
+  const perCat = new Map<string, number[]>();
+  for (const e of errs) {
+    const list = perCat.get(e.category) ?? [];
+    list.push(Math.abs(e.err));
+    perCat.set(e.category, list);
+  }
+  const perCategory = [...perCat.entries()]
+    .filter(([, v]) => v.length >= 2)
+    .map(([category, v]) => ({ category, n: v.length, median_abs_log_err: roundTo4dp(median(v)) }))
+    .sort((a, b) => b.n - a.n || (a.category < b.category ? -1 : a.category > b.category ? 1 : 0));
+  return {
+    n: live.length,
+    median_abs_log_err: roundTo4dp(medAbs),
+    median_error_factor: roundTo4dp(Math.exp(medAbs)),
+    within_2x: roundTo4dp(errs.filter((e) => Math.abs(e.err) < Math.log(2)).length / errs.length),
+    within_3x: roundTo4dp(errs.filter((e) => Math.abs(e.err) < Math.log(3)).length / errs.length),
+    within_1_5x: roundTo4dp(errs.filter((e) => Math.abs(e.err) < Math.log(1.5)).length / errs.length),
+    p80_abs_log_err: roundTo4dp(percentile(absErrs, 0.8)),
+    band_factor: roundTo4dp(Math.exp(medAbs)),
+    per_category: perCategory,
+  };
+}
+
+/**
+ * The leave-one-out backtest of the FULL scoring function — the exact
+ * function that scores the board. Each live-token protocol is predicted
+ * from the others: the curve refit without it, its category's family
+ * factor recomputed without it, and the growth multiplier applied from its
+ * own seven-day change. The log error is recorded. Radar-4 backtested the
+ * curve and the family factor only and never tested the multipliers it
+ * shipped; this is the backtest the band and the methodology panel use.
+ */
+export function backtestFullPipeline(snapshot: Snapshot, k: number = SHRINKAGE_K): BacktestResult {
+  const live = liveComparables(snapshot);
+  const errs: { slug: string; category: string; err: number }[] = live.map((p) => {
+    const others = live.filter((q) => q.slug !== p.slug);
+    const fit = powerLawFit(others);
+    const factors = familyFactors(others, fit, k);
+    const v = scoreProtocol(p, snapshot.as_of, fit, factors);
+    return { slug: p.slug, category: p.category ?? 'Other', err: Math.log(v.implied) - Math.log(p.mcap_usd!) };
   });
   const absErrs = errs.map((e) => Math.abs(e.err)).sort((a, b) => a - b);
   const medAbs = median(absErrs);
@@ -665,7 +718,7 @@ export function buildBoard(
   model: ModelConstants = MODEL,
   backtest: BacktestResult | null = null,
 ): BoardRow[] {
-  const test = backtest ?? backtestPowerLaw(snapshot, model.shrinkage_k);
+  const test = backtest ?? backtestFullPipeline(snapshot, model.shrinkage_k);
   const live = liveComparables(snapshot);
   const fit = powerLawFit(live);
   const factors = familyFactors(live, fit, model.shrinkage_k);
@@ -708,8 +761,6 @@ export function buildBoard(
       family_comparables: entry.familyComparables,
       growth_pct: entry.growthPct,
       growth_multiplier: roundTo4dp(entry.growthMult),
-      maturity_multiplier: roundTo4dp(entry.maturityMult),
-      chains_multiplier: roundTo4dp(entry.chainsMult),
       age_days: entry.age,
     },
     farm_steps: farmSteps(entry.p, entry.age, entry.econ),
@@ -862,16 +913,17 @@ export function compactRow(row: BoardRow, watchlist: boolean, floorUsd: number):
     family_factor: row.model.family_factor,
     family_comparables: row.model.family_comparables,
     growth_multiplier: row.model.growth_multiplier,
-    maturity_multiplier: row.model.maturity_multiplier,
-    chains_multiplier: row.model.chains_multiplier,
     watchlist,
     above_floor: row.tvl_usd >= floorUsd,
   };
 }
 
-/** Everything the dashboard renders, from the snapshot. */
+/** Everything the dashboard renders, from the snapshot. The headline
+ * backtest is the full pipeline; the curve-only backtest sits beside it
+ * for the ablation. */
 export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): { board: BoardRow[]; radar: RadarData } {
-  const backtest = backtestPowerLaw(snapshot, model.shrinkage_k);
+  const backtestCurve = backtestPowerLaw(snapshot, model.shrinkage_k);
+  const backtest = backtestFullPipeline(snapshot, model.shrinkage_k);
   const board = buildBoard(snapshot, model, backtest);
   const live = liveTokenRows(snapshot);
   const liveComps = liveComparables(snapshot);
@@ -905,6 +957,7 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     pre_token_audited: snapshot.protocols.filter(isPreToken).length,
     pre_token_rankable: snapshot.protocols.filter(isRankable).length,
     backtest,
+    backtest_curve_only: backtestCurve,
     power_law: {
       n: liveComps.length,
       slope: roundTo4dp(fit.b),
